@@ -21,7 +21,54 @@ from keras.utils import multi_gpu_model
 
 import cv2
 
+# Example of how to use last several frames info next
+# Key word: class, deque
+class Line:
+    def __init__(self):
+        # was the line detected in the last iteration?
+        self.detected = False
 
+        # x and y values in last frame
+        self.x = None
+        self.y = None
+
+        # x intercepts for average smoothing
+        self.bottom_x = deque(maxlen=frame_num)
+        self.top_x = deque(maxlen=frame_num)
+
+        # Record last x intercept
+        self.current_bottom_x = None
+        self.current_top_x = None
+
+        # Record radius of curvature
+        self.radius = None
+
+        # Polynomial coefficients: x = A*y**2 + B*y + C
+        self.A = deque(maxlen=frame_num)
+        self.B = deque(maxlen=frame_num)
+        self.C = deque(maxlen=frame_num)
+        self.fit = None
+        self.fitx = None
+        self.fity = None
+        
+    def quick_search(self, nonzerox, nonzeroy):
+        """
+        Assuming in last frame, lane has been detected. Based on last x/y coordinates, quick search current lane.
+        """
+        x_inds = []
+        y_inds = []
+        if self.detected:
+            win_bottom = 720
+            win_top = 630
+            while win_top >= 0:
+                yval = np.mean([win_top, win_bottom])
+                xval = (np.median(self.A)) * yval ** 2 + (np.median(self.B)) * yval + (np.median(self.C))
+                x_idx = np.where((((xval - 50) < nonzerox)
+                                  & (nonzerox < (xval + 50))
+                                  & ((nonzeroy > win_top) & (nonzeroy < win_bottom))))
+
+# Example end
+                
 class YOLO(object):
     _defaults = {
         "model_path": 'model_data/yolo.h5',
