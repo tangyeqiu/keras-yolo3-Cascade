@@ -57,6 +57,7 @@ class YOLO(object):
         self.last_num = 1
         self.dis_i = 0
         self.test_date = datetime.datetime.now()
+        self.box_buffer = [[] for i in range(5)]
 
     def _get_class(self):
         classes_path = os.path.expanduser(self.classes_path)
@@ -219,6 +220,7 @@ class YOLO(object):
     def num_trans(self, tiny_out_boxes, tiny_out_scores, tiny_out_classes):
         num_pos = []
         num_char = []
+        num_score = []
         for tiny_i, tiny_c in reversed(list(enumerate(tiny_out_classes))):
             tiny_predicted_class = self.tiny_class_names[tiny_c]
             tiny_box = tiny_out_boxes[tiny_i]
@@ -230,7 +232,8 @@ class YOLO(object):
                 num_char.append(tiny_predicted_class)
             else:
                 num_char.append('0')
-        return num_pos, num_char
+            num_score.append(tiny_score)
+        return num_pos, num_char, num_score
 
     def num_filter(self, last_num, num_char, num_pos, count_num):
         num_dis = 0
@@ -281,6 +284,50 @@ class YOLO(object):
         #         count_num = 0
         return num_dis, count_num
 
+    def new_num_filter(self, last_num, num_char, num_pos, count_num):
+        # -------------------------------
+        num_dis = 0
+        last_num_10_1 = (last_num - 1) // 10
+        last_num_01_1 = (last_num - 1) % 10
+        last_num_list_1 = [str(last_num_10_1), str(last_num_01_1)]
+        if len(num_char) == 2:
+            if num_pos[0] < num_pos[1]:
+                num_dis = int(num_char[0]) * 10 + int(num_char[1])
+            if num_pos[1] < num_pos[0]:
+                num_dis = int(num_char[1]) * 10 + int(num_char[0])
+        elif 0 < len(num_char) < 2:
+            if num_char in last_num_list_1:
+                num_dis = last_num - 1
+            else:
+                num_dis = last_num
+        elif len(num_char) == 0:
+            num_dis = 0
+        else:
+            if last_num_list_1 in num_char:
+                num_dis = last_num - 1
+            else:
+                num_dis = last_num
+        #  ------------------------------------------------------------NEW FILTER
+        if num_dis != last_num:  # counting difference between input and last number
+            count_num += 1
+
+        if num_dis == 0:  # if input=0, two cases: (1)counting down is over (2)wrong recognition
+            if count_num > 9:  # assume case(1):countdown finished, threshold 10 frames
+                num_out = num_dis  # shows "zero", purge counter
+                count_num = 0
+            else:  # case(2):wrong recognition
+                num_out = last_num  # shows last valid number
+
+        else:  # num_dis != 0      # if input!=0. two cases: (1)next number (2)wrong recognition
+            if count_num > 4:  # assume case(1)next_number, threshold 5 frames
+                num_out = num_dis  # show new number, purge counter
+                count_num = 0
+            else:  # assume case(2)wrong recognition(flickering within 5 frames)
+                num_out = last_num  # shows last valid number
+
+        return max(num_out, 0), count_num
+        # ---------------------------------------------
+
     def colour_detect(self, roi):
         roi_hsv = cv2.cvtColor(np.asarray(roi), cv2.COLOR_RGB2HSV)
 
@@ -304,13 +351,13 @@ class YOLO(object):
         mask_red_val = np.sum(mask_red)
         mask_yellow_val = np.sum(mask_yellow)
 
-        if mask_green_val > (mask_red_val//2 + mask_yellow_val//2) and mask_green_val/roi_hsv_val > 0.045:
+        if mask_green_val > mask_red_val and mask_green_val > mask_yellow_val and mask_green_val/roi_hsv_val > 0.045:
             colour = "Green "
             colour_mark = (0, 255, 0)
-        elif mask_red_val > (mask_green_val//2 + mask_yellow_val//2) and mask_red_val/roi_hsv_val > 0.045:
+        elif mask_red_val > mask_green_val and mask_red_val > mask_yellow_val and mask_red_val/roi_hsv_val > 0.045:
             colour = "Red   "
             colour_mark = (255, 0, 0)
-        elif mask_yellow_val > (mask_green_val//2 + mask_red_val//2) and mask_yellow_val/roi_hsv_val > 0.04:
+        elif mask_yellow_val > mask_green_val and mask_yellow_val > mask_red_val and mask_yellow_val/roi_hsv_val > 0.04:
             colour = "Yellow"
             colour_mark = (255, 255, 0)
         else:
@@ -334,8 +381,12 @@ class YOLO(object):
         # print('Found {} boxes for {}'.format(len(out_boxes), 'img'))
         tl_index = 0
         num_display = []
+        num_char_display = []
+        num_score_display = []
+
         colour_display = []
         colour_str = []
+
         # Start the Draw
         draw = ImageDraw.Draw(image)
         # self.count_num += 1
@@ -364,8 +415,17 @@ class YOLO(object):
             out_boxes, out_scores, out_classes = new_box, new_score, new_class
         else:
             out_boxes, out_scores, out_classes = box_to_sort, score_to_sort, class_to_sort
-
         #  End of sort
+        # out_boxes, out_scores, out_classes = box_to_sort, score_to_sort, class_to_sort
+
+        # Debounce
+        # End of debounce
+
+        # Store the boxes
+        # self.box_buffer.append(out_boxes)
+        if len(self.box_buffer) > 5:
+            del self.box_buffer[0]
+        # End of store
 
         for i, c in reversed(list(enumerate(out_classes))):
             # predicted_class = self.class_names[c]
@@ -400,16 +460,19 @@ class YOLO(object):
                 tiny_out_boxes, tiny_out_scores, tiny_out_classes = self.detect_num(roi)
             else:
                 tiny_out_boxes, tiny_out_scores, tiny_out_classes = [], [], []
-            num_pos, num_char = self.num_trans(tiny_out_boxes, tiny_out_scores, tiny_out_classes)
+            num_pos, num_char, num_score = self.num_trans(tiny_out_boxes, tiny_out_scores, tiny_out_classes)
             # End of Num recognition
 
             # Num filter
-            num_dis, count_num = self.num_filter(self.last_num, num_char, num_pos, self.count_num)
+            # num_dis, count_num = self.num_filter(self.last_num, num_char, num_pos, self.count_num)
+            num_dis, count_num = self.new_num_filter(self.last_num, num_char, num_pos, self.count_num)
             self.last_num = num_dis
             self.count_num = count_num
             # End of filter
 
             num_display.append(num_dis)
+            num_char_display.append(num_char)
+            num_score_display.append(num_score)
 
             # Show box
             label = '{}'.format(tl_index)
@@ -417,21 +480,74 @@ class YOLO(object):
                                           size=np.floor(3e-2 * image_roi.size[1] + 0.5).astype('int32'))
             thickness = (image_roi.size[0] + image_roi.size[1]) // 500
             label_size = draw.textsize(label, font)
-            if top - label_size[1] >= 0:
-                text_origin = np.array([left+image_left, top+image_top - label_size[1]])
-            else:
-                text_origin = np.array([left+image_left, top+image_top + 1])
+            # if top - label_size[1] >= 0:
+            #     text_origin = np.array([left+image_left, top+image_top - label_size[1]])
+            # else:
+            #     text_origin = np.array([left+image_left, top+image_top + 1])
 
             for i in range(thickness):
                 draw.rectangle(
                         [left+image_left + i, top+image_top + i, right+image_left - i, bottom+image_top - i],
                         outline=colour_mark)
-            draw.rectangle(
-                    [tuple(text_origin), tuple(text_origin + label_size)],
-                    fill=colour_mark)
+            # draw.rectangle(
+            #         [tuple(text_origin), tuple(text_origin + label_size)],
+            #         fill=colour_mark)
             # draw.text(text_origin, label, fill=(128, 128, 128), font=font)
-            draw.text(text_origin, label, fill=(255-colour_mark[0], 255-colour_mark[1], 255-colour_mark[2]), font=font)
+            # draw.text(text_origin, label, fill=(255-colour_mark[0], 255-colour_mark[1], 255-colour_mark[2]), font=font)
             # End of show
+
+        # Noob's operation
+        num_index = []
+        new_num_display = []
+        new_colour_str = []
+        new_colour_display = []
+        if len(out_boxes) > 0:
+            if len(self.box_buffer[4]) >= len(out_boxes):
+                self.box_buffer.append(self.box_buffer[4])
+                diff = [[] for i in range(len(out_boxes))]
+                for i in range(len(out_boxes)):
+                    curr_top, curr_left, curr_bottom, curr_right = out_boxes[i]
+                    for j in range(len(self.box_buffer[4])):
+                        last_top, last_left, last_bottom, last_right = self.box_buffer[4][j]
+                        diff[i].append(abs(last_left - curr_left))
+                    num_index.append(diff[i].index(min(diff[i])))
+                for i in range(len(self.box_buffer[4])):
+                    new_num_display.append(0)
+                    new_colour_str.append("      ")
+                    new_colour_display.append((127, 127, 127))
+                for i in range(len(out_boxes)):
+                    # del new_num_display[num_index[i]]
+                    new_num_display[num_index[i]] = num_display[i]
+                    # del new_colour_str[num_index[i]]
+                    new_colour_str[num_index[i]] = colour_str[i]
+                    # del new_colour_display[num_index[i]]
+                    new_colour_display[num_index[i]] = colour_display[i]
+            else:
+                self.box_buffer.append(out_boxes)
+                diff = [[] for i in range(len(self.box_buffer[4]))]
+                for i in range(len(self.box_buffer[4])):
+                    curr_top, curr_left, curr_bottom, curr_right = self.box_buffer[4][i]
+                    for j in range(len(out_boxes)):
+                        last_top, last_left, last_bottom, last_right = out_boxes[j]
+                        diff[i].append(abs(last_left - curr_left))
+                    num_index.append(diff[i].index(min(diff[i])))
+                for i in range(len(out_boxes)):
+                    new_num_display.append(0)
+                    new_colour_str.append("      ")
+                    new_colour_display.append((127, 127, 127))
+                for i in range(len(self.box_buffer[4])):
+                    # del new_num_display[num_index[i]]
+                    new_num_display[num_index[i]] = num_display[i]
+                    # del new_colour_str[num_index[i]]
+                    new_colour_str[num_index[i]] = colour_str[i]
+                    # del new_colour_display[num_index[i]]
+                    new_colour_display[num_index[i]] = colour_display[i]
+        else:
+            self.box_buffer.append([])
+            new_num_display = []
+            new_colour_str = []
+            new_colour_display = []
+        # End of noobs
 
         # Show info:
         draw.rectangle(
@@ -440,13 +556,21 @@ class YOLO(object):
         font_cd = ImageFont.truetype(font='font/FiraMono-Medium.otf',
                                      size=np.floor(3e-2 * image.size[1] + 0.5).astype('int32'))
 
-        for dis_i in range(tl_index):
+        # for dis_i in range(len(num_display)):
+        #     draw.text([image_left, image.height / 8 * 6 + dis_i * 40, image_right, image.height],
+        #               "|No." + str(dis_i+1) + "| " + colour_str[dis_i] + "| Countdown: " + str(num_display[dis_i]) + " s",
+        #               fill=colour_display[dis_i], font=font_cd)
+        #     draw.text([image_left, image.height / 8 * 6 + 20 + dis_i * 40, image_right, image.height],
+        #               "------------------------------",
+        #               fill=colour_display[dis_i], font=font_cd)
+
+        for dis_i in range(len(new_num_display)):
             draw.text([image_left, image.height / 8 * 6 + dis_i * 40, image_right, image.height],
-                      "|No." + str(dis_i+1) + "| " + colour_str[dis_i] + "| Countdown: " + str(num_display[dis_i]) + " s",
-                      fill=colour_display[dis_i], font=font_cd)
+                      "| " + new_colour_str[dis_i] + "| Countdown: " + str(new_num_display[dis_i]) + " s",
+                      fill=new_colour_display[dis_i], font=font_cd)
             draw.text([image_left, image.height / 8 * 6 + 20 + dis_i * 40, image_right, image.height],
                       "------------------------------",
-                      fill=colour_display[dis_i], font=font_cd)
+                      fill=new_colour_display[dis_i], font=font_cd)
         # End of info
 
         # Show logo and test date
@@ -465,13 +589,35 @@ class YOLO(object):
         draw.text([0, image.height / 8 * 6 + 120, image_left, image.height],
                   "Recognition",
                   fill=(255, 255, 255), font=font_logo)
+        draw.text([0, image.height / 8 * 6 + 160, image_left, image.height],
+                  "Box track:",
+                  fill=(255, 255, 255), font=font_logo)
+
+        font_track = ImageFont.truetype(font='font/FiraMono-Medium.otf',
+                                       size=np.floor(2e-2 * image.size[1] + 0.5).astype('int32'))
+        for i in range(len(self.box_buffer)):
+            draw.text([0, image.height / 8 * 6 + 200 + i * 30, image_left, image.height],
+                      str(self.box_buffer[i]),
+                      fill=(255, 255, 255), font=font_track)
+
+        # draw.text([image_right, image.height / 8 * 6, image.width, image.height],
+        #           "Test date:",
+        #           fill=(255, 255, 255), font=font_cd)
+        # draw.text([image_right, image.height / 8 * 6 + 40, image.width, image.height],
+        #           str(self.test_date)[0:19],
+        #           fill=(255, 255, 255), font=font_cd)
+
         draw.text([image_right, image.height / 8 * 6, image.width, image.height],
-                  "Test date:",
+                  "Num chars and scores",
                   fill=(255, 255, 255), font=font_cd)
-        draw.text([image_right, image.height / 8 * 6 + 40, image.width, image.height],
-                  str(self.test_date)[0:19],
-                  fill=(255, 255, 255), font=font_cd)
-        # End of show
+        for dis_i in range(tl_index):
+            draw.text([image_right, image.height / 8 * 6 + 40 + 60 * dis_i, image.width, image.height],
+                      str(num_char_display[dis_i]),
+                      fill=(255, 255, 255), font=font_track)
+            draw.text([image_right, image.height / 8 * 6 + 70 + 60 * dis_i, image.width, image.height],
+                      str(num_score_display[dis_i]),
+                      fill=(255, 255, 255), font=font_track)
+        # End of show + str(num_char_display) + str(num_score_display)
 
         # Draw ROI (Optional)
         label = 'ROI'
