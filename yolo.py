@@ -336,7 +336,7 @@ class YOLO(object):
         lower_red2 = np.array([156, 43, 46])
         upper_red2 = np.array([180, 255, 255])
         lower_green = np.array([35, 43, 46])
-        upper_green = np.array([124, 255, 255])
+        upper_green = np.array([80, 255, 255]) #135
         lower_yellow = np.array([18, 43, 46])
         upper_yellow = np.array([34, 255, 255])
 
@@ -351,13 +351,13 @@ class YOLO(object):
         mask_red_val = np.sum(mask_red)
         mask_yellow_val = np.sum(mask_yellow)
 
-        if mask_green_val > mask_red_val and mask_green_val > mask_yellow_val and mask_green_val/roi_hsv_val > 0.045:
+        if mask_green_val > mask_red_val and mask_green_val > mask_yellow_val and mask_green_val/roi_hsv_val > 0.03:
             colour = "Green "
             colour_mark = (0, 255, 0)
-        elif mask_red_val > mask_green_val and mask_red_val > mask_yellow_val and mask_red_val/roi_hsv_val > 0.045:
+        elif mask_red_val > mask_green_val and mask_red_val > mask_yellow_val and mask_red_val/roi_hsv_val > 0.03:
             colour = "Red   "
             colour_mark = (255, 0, 0)
-        elif mask_yellow_val > mask_green_val and mask_yellow_val > mask_red_val and mask_yellow_val/roi_hsv_val > 0.04:
+        elif mask_yellow_val > mask_green_val and mask_yellow_val > mask_red_val and mask_yellow_val/roi_hsv_val > 0.03:
             colour = "Yellow"
             colour_mark = (255, 255, 0)
         else:
@@ -366,6 +366,38 @@ class YOLO(object):
         # print(mask_green_val, mask_red_val, mask_yellow_val)
         # print(colour, mask_green_val/roi_hsv_val, mask_red_val/roi_hsv_val, mask_yellow_val/roi_hsv_val)
         return colour, colour_mark
+
+    def find_contour(self, yolo_roi):
+        # pre-process img: convert to bi-value img
+        gray = cv2.cvtColor(yolo_roi, cv2.COLOR_BGR2GRAY)
+        thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)[1]
+
+        contours = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # Check for compatibility with different OpenCV versions
+        contours = contours[0]  # if imutils.is_cv2() else contours[1]
+
+        TL_regions = []  # coordinates
+
+        for contour in contours:
+            # Get the rectangle that contains the contour
+            (x, y, w, h) = cv2.boundingRect(contour)
+            # filter some wrong contour
+            if w > 5 and h > 5 and h / w > 1.8:
+                TL_regions.append((x, y, w, h))
+
+        # sort according to contour area [0] notes the biggest one. 每一个元素包含 x，y，w，h 四个信息，即x, y, w, h = TL_Max_region[i]
+        TL_Max_region = sorted(TL_regions, key=lambda k: k[2] * k[3], reverse=True)
+
+        if len(TL_Max_region):
+            # if TL_Max_region is no empty, crop original roi by contour: yolo_roi[y:y + h, x:x + w]
+            x, y, w, h = TL_Max_region[0]
+            TL_img = yolo_roi[y:y + h, x:x + w]
+        else:
+            # if empty then ouput original roi
+            TL_img = yolo_roi
+
+        return TL_img
+
 
     def detect_image(self, image):
         # raw_image = image.copy()
@@ -447,6 +479,15 @@ class YOLO(object):
             box_roi = left, top, right, bottom
             roi = image_roi.crop(box_roi)
             # End of ROI
+
+            # New func test 20190702
+            roi = np.asarray(roi)
+            roi = cv2.cvtColor(roi,cv2.COLOR_RGB2BGR)
+            roi = self.find_contour(roi)
+            roi = cv2.cvtColor(roi,cv2.COLOR_BGR2RGB)
+            roi = Image.fromarray(roi)
+            # End of New func test 20190702
+
 
             # Colour detection
             colour, colour_mark = self.colour_detect(roi)
@@ -645,23 +686,40 @@ class YOLO(object):
         self.sess.close()
 
 
-def detect_video(yolo, video_path, output_path=""):
+def detect_video_offline(yolo, video_path, output_path=""):
+    from imageio import get_writer
+
     # vid = cv2.VideoCapture(0)
     vid = cv2.VideoCapture(video_path)
     if not vid.isOpened():
         raise IOError("Couldn't open webcam or video")
-    video_FourCC    = int(vid.get(cv2.CAP_PROP_FOURCC))
-    video_fps       = vid.get(cv2.CAP_PROP_FPS)
-    video_size      = (int(vid.get(cv2.CAP_PROP_FRAME_WIDTH)),
-                       int(vid.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+    # video_FourCC    = int(vid.get(cv2.CAP_PROP_FOURCC))
+    # video_fps       = vid.get(cv2.CAP_PROP_FPS)
+    # video_size      = (int(vid.get(cv2.CAP_PROP_FRAME_WIDTH)),
+    #                    int(vid.get(cv2.CAP_PROP_FRAME_HEIGHT)))
     isOutput = True if output_path != "" else False
     if isOutput:
-        print("!!! TYPE:", type(output_path), type(video_FourCC), type(video_fps), type(video_size))
-        out = cv2.VideoWriter(output_path, video_FourCC, video_fps, video_size)
-    accum_time = 0
-    curr_fps = 0
-    fps = "FPS: ??"
-    prev_time = timer()
+        out1 = get_writer(
+            output_path,
+            fps=30,  # FPS is in units Hz; should be real-time.
+            codec='libx264',  # When used properly, this is basically
+            # "PNG for video" (i.e. lossless)
+            quality=None,  # disables variable compression
+            pixelformat='yuv420p',  # keep it as RGB colours
+            ffmpeg_params=[  # compatibility with older library versions
+                '-preset',  # set to faster, veryfast, superfast, ultrafast
+                'fast',  # for higher speed but worse compression
+                '-crf',  # quality; set to 0 for lossless, but keep in mind
+                '11'  # that the camera probably adds static anyway
+            ]
+        )
+        # print("!!! TYPE:", type(output_path), type(video_FourCC), type(video_fps), type(video_size))
+        # out = cv2.VideoWriter(output_path, video_FourCC, video_fps, video_size)
+    # accum_time = 0
+    # curr_fps = 0
+    # fps = "FPS: ??"
+    # prev_time = timer()
+
     while True:
         return_value, frame = vid.read()
 
@@ -671,8 +729,113 @@ def detect_video(yolo, video_path, output_path=""):
         image = yolo.detect_image(image)
         result = np.asarray(image)
 
-        result = cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
+        result_show = cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
 
+        # curr_time = timer()
+        # exec_time = curr_time - prev_time
+        # prev_time = curr_time
+        # accum_time = accum_time + exec_time
+        # curr_fps = curr_fps + 1
+        # if accum_time > 1:
+        #     accum_time = accum_time - 1
+        #     fps = "FPS: " + str(curr_fps)
+        #     curr_fps = 0
+        # cv2.putText(result, text=fps, org=(3, 15), fontFace=cv2.FONT_HERSHEY_SIMPLEX,
+        #             fontScale=0.50, color=(255, 0, 0), thickness=2)
+        cv2.namedWindow("result", cv2.WINDOW_NORMAL)
+        cv2.imshow("result", result_show)
+        if isOutput:
+            out1.append_data(result)
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+    yolo.close_session()
+
+
+def detect_video_online(yolo, video_path, output_path=""):
+    import cv2
+    from pypylon import pylon
+    from imageio import get_writer
+    ##################################################################
+    # conecting to the first available camera
+
+    camera = pylon.InstantCamera(pylon.TlFactory.GetInstance().CreateFirstDevice())
+
+    # Grabing Continusely (video) with minimal delay
+    camera.StartGrabbing(pylon.GrabStrategy_LatestImageOnly)
+    converter = pylon.ImageFormatConverter()
+
+    # converting to opencv bgr format
+    converter.OutputPixelFormat = pylon.PixelType_BGR8packed
+    converter.OutputBitAlignment = pylon.OutputBitAlignment_MsbAligned
+    ##################################################################
+    # vid = cv2.VideoCapture(video_path)
+    # vid = cv2.VideoCapture(0)
+    # if not vid.isOpened():
+    #     raise IOError("Couldn't open webcam or video")
+    if camera.IsGrabbing():
+        vid = camera.RetrieveResult(1000, pylon.TimeoutHandling_ThrowException)
+
+    # video_FourCC = int(vid.get(cv2.CAP_PROP_FOURCC))
+    # video_fps = vid.get(cv2.CAP_PROP_FPS)
+    # video_size = (int(vid.get(cv2.CAP_PROP_FRAME_WIDTH)),
+    #               int(vid.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+
+    isOutput = True if output_path != "" else False
+    if isOutput:
+        out_raw = get_writer(
+            "C:/Users/tag2sgh/Documents\GitHub/raw_video/raw_vid8_20190807.mp4",
+            fps=30,  # FPS is in units Hz; should be real-time.
+            codec='libx264',  # When used properly, this is basically
+            # "PNG for video" (i.e. lossless)
+            quality=None,  # disables variable compression
+            pixelformat='yuv420p',  # keep it as RGB colours
+            ffmpeg_params=[  # compatibility with older library versions
+                '-preset',  # set to faster, veryfast, superfast, ultrafast
+                'fast',  # for higher speed but worse compression
+                '-crf',  # quality; set to 0 for lossless, but keep in mind
+                '11'  # that the camera probably adds static anyway
+            ]
+        )
+        out1 = get_writer(
+            output_path,
+            fps=30,  # FPS is in units Hz; should be real-time.
+            codec='libx264',  # When used properly, this is basically
+            # "PNG for video" (i.e. lossless)
+            quality=None,  # disables variable compression
+            pixelformat='yuv420p',  # keep it as RGB colours
+            ffmpeg_params=[  # compatibility with older library versions
+                '-preset',  # set to faster, veryfast, superfast, ultrafast
+                'fast',  # for higher speed but worse compression
+                '-crf',  # quality; set to 0 for lossless, but keep in mind
+                '11'  # that the camera probably adds static anyway
+            ]
+        )
+        # print("!!! TYPE:", type(output_path), type(video_FourCC), type(video_fps), type(video_size))
+        # out = cv2.VideoWriter(output_path, video_FourCC, 30, video_size)
+    accum_time = 0
+    curr_fps = 0
+    fps = "FPS: ??"
+    prev_time = timer()
+    while camera.IsGrabbing():
+        grabResult = camera.RetrieveResult(1000, pylon.TimeoutHandling_ThrowException)
+
+        if grabResult.GrabSucceeded():
+            # Access the image data
+            image = converter.Convert(grabResult)
+            frame = image.GetArray()
+    # while True:
+
+        # return_value, frame = vid.read()
+
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+        out_raw.append_data(frame)
+        image = Image.fromarray(frame)
+        image = yolo.detect_image(image)
+        result = np.asarray(image)
+
+        result_show = cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
         curr_time = timer()
         exec_time = curr_time - prev_time
         prev_time = curr_time
@@ -684,10 +847,20 @@ def detect_video(yolo, video_path, output_path=""):
             curr_fps = 0
         cv2.putText(result, text=fps, org=(3, 15), fontFace=cv2.FONT_HERSHEY_SIMPLEX,
                     fontScale=0.50, color=(255, 0, 0), thickness=2)
+        cv2.putText(result_show, text=fps, org=(3, 15), fontFace=cv2.FONT_HERSHEY_SIMPLEX,
+                    fontScale=0.50, color=(255, 0, 0), thickness=2)
         cv2.namedWindow("result", cv2.WINDOW_NORMAL)
-        cv2.imshow("result", result)
+        cv2.imshow("result", result_show)
         if isOutput:
-            out.write(result)
+            # out.write(result)
+            out1.append_data(result)
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
+        grabResult.Release()
+    camera.StopGrabbing()
     yolo.close_session()
+
+
+def detect_video(yolo, video_path, output_path=""):
+    # detect_video_offline(yolo, video_path, output_path)
+    detect_video_online(yolo, video_path, output_path)
